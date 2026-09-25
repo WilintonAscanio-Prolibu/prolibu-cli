@@ -812,6 +812,7 @@ module.exports = {
   uploadZipFile,
   patchSite,
   createSiteDoc,
+  ensureSiteExists,
   createSite,
   runDevSite,
 };
