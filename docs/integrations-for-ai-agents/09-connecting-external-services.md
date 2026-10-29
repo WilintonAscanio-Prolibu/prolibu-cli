@@ -365,6 +365,8 @@ Combine the primitives to keep a Prolibu object and an external object in step. 
 
 Add an `externalId` custom field to the Prolibu object (see [Custom Objects & Fields](02-custom-objects-and-fields.md)) and store the external record's id there; on the external side, store the Prolibu `_id` in *its* external-id field. Every sync step then keys off this pair, so the same change flowing back and forth resolves to the same two records instead of creating duplicates.
 
+> A custom field is not the only option: every record also has a built-in `refId` for exactly this purpose. See [External References](13-external-references.md) for when `refId` is the better choice and when a custom field is.
+
 - Outbound: after creating the external record, write its id back to `externalId` on the Prolibu record.
 - Inbound: look up the Prolibu record by `externalId` (as in [§4.1](#41-create-the-receiver-script-then-the-endpoint)); update if found, create if not (**upsert**).
 

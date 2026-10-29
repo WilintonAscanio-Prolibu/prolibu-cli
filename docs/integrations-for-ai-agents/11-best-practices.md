@@ -70,7 +70,7 @@ Every error returns a JSON body with this shape (see [REST API](03-rest-api.md) 
 | `401` | Missing or invalid credential | Refresh/replace the token; re-auth (see [Authentication](04-authentication-and-connected-apps.md)) |
 | `403` | Authenticated but not permitted — **including a record that exists but is hidden** from the caller | Do not retry; the caller lacks access |
 | `404` | Object or record does not exist (a brand-new custom object also `404`s until its schema is applied) | Treat as "not found", distinct from `403` |
-| `409` | Conflict — typically a duplicate on a `unique` field | Reconcile (fetch the existing record) rather than re-create |
+| `409` | Conflict — not what a duplicate value returns (a duplicate on a `unique` field is a `400` with `Duplicated value`) | Treat as terminal; for duplicates, fetch the existing record rather than re-create |
 | `429` | Rate limited | Back off and retry (see [§4](#4-rate-limit-friendliness)) |
 | `5xx` | Transient server-side error | Retry with exponential back-off; safe only for idempotent operations |
 
@@ -122,7 +122,7 @@ The write endpoints are **not** idempotent by themselves: a repeated `POST /v2/<
 
 Pick a field that is unique in *your* source system and store it on the Prolibu record — an order number, an external id, an email. Two options:
 
-- **Declare it as the object's `primaryKey`** (or put a `unique` constraint on it). A duplicate then fails with `409`, which you catch and treat as "already exists" rather than an error. See [Custom Objects & Fields](02-custom-objects-and-fields.md).
+- **Declare it as the object's `primaryKey`** (or put a `unique` constraint on it). A duplicate then fails with `400` (`Duplicated value`); re-read by the key to confirm the record exists and treat it as "already exists" rather than an error. See [Custom Objects & Fields](02-custom-objects-and-fields.md).
 - **Check-then-write:** query for the key first; `PATCH` if it exists, `POST` if it doesn't.
 
 ```js
@@ -146,7 +146,7 @@ async function upsertDeal(order) {
 }
 ```
 
-> Check-then-write has a race window if two calls run concurrently for the same key. For hard guarantees, back it with a `unique`/`primaryKey` constraint so the database rejects the second write with `409`, and treat that `409` as success.
+> Check-then-write has a race window if two calls run concurrently for the same key. For hard guarantees, back it with a `unique`/`primaryKey` constraint so the database rejects the second write with a `400` (`Duplicated value`), and after re-reading by the key to confirm, treat it as success.
 
 ### 3.2 Idempotency on the receiving side (webhooks)
 
@@ -222,7 +222,7 @@ There is no single "load 10,000 records in one call" endpoint — writes go one 
 
 - **Bound concurrency** with a worker pool (§4), not an unthrottled `Promise.all` over thousands of items.
 - **Make each write idempotent** (§3) so a mid-run failure can be re-run without creating duplicates.
-- **Handle partial failure per item**: record which succeeded, retry only the transient failures (`429`/`5xx`), and surface terminal ones (`400`/`409`).
+- **Handle partial failure per item**: record which succeeded, retry only the transient failures (`429`/`5xx`), and surface terminal ones (`400`).
 - For write-heavy syncs that must run *inside* Prolibu, a **scheduled automation script** can page and process in the background — see [Automation & Scripts](05-automation-and-scripts.md).
 
 ---
@@ -315,7 +315,7 @@ for (const rec of data) {
 
 - **Isolate fixtures with a marker** (`TEST-…`, or a dedicated `externalOrderId` namespace) so a teardown query can never match real data.
 - **Verify against the sandbox host only.** Gate destructive teardown behind an explicit check that `BASE` is the test host — a `DELETE` loop pointed at production is unrecoverable.
-- **Exercise the failure paths, not just the happy path:** assert that a missing `required` field returns `400`, a hidden record returns `403`, a bad id returns `404`, and a duplicate on a `unique` key returns `409`. These are the branches your production error handling (§2) must get right.
+- **Exercise the failure paths, not just the happy path:** assert that a missing `required` field returns `400`, a hidden record returns `403`, a bad id returns `404`, and a duplicate on a `unique` key returns `400` (`Duplicated value`). These are the branches your production error handling (§2) must get right.
 
 ### 8.3 Promote to production
 
@@ -359,9 +359,11 @@ async function syncOrder(order) {
       body: JSON.stringify(payload),
     });
   } catch (e) {
-    // 3. Lost a create race → the unique key rejected us with 409. Fetch & update.
-    if (String(e.message).startsWith('409')) {
+    // 3. Lost a create race → the unique key rejected us with a 400 (Duplicated value).
+    //    Re-read by the key; if the record is there now, update it.
+    if (String(e.message).startsWith('400')) {
       const again = await prolibu(`/deal/?query=${q}&limit=1&select=_id`);
+      if (!again.data.length) throw e;   // a different 400: not a lost race
       return prolibu(`/deal/${again.data[0]._id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -378,7 +380,7 @@ Expected outcomes:
 ```
 first call   → 201  { "_id": "665f...", "dealName": "...", "externalOrderId": "ORD-42" }
 repeat call  → 200  (PATCH the same record — no duplicate created)
-race loser   → 409 caught → 200 (PATCH the winner's record)
+race loser   → 400 (Duplicated value) caught → re-read → 200 (PATCH the winner's record)
 ```
 
 (`prolibu(...)` is the wrapper from [§2.3](#23-which-errors-are-retryable), which already retries `429`/`5xx` with back-off and throws on terminal `4xx`.)
@@ -474,7 +476,7 @@ Assert on the **status code and the presence of `statusCode`/`error`**, never on
 3. **Matching on `error` message text.** Messages are localized and can change — branch on `statusCode` / HTTP status, not on the human-readable string (§2.1).
 4. **Collapsing `403` and `404`.** "Exists but hidden" (`403`) and "doesn't exist" (`404`) are different outcomes on single-record calls; on lists, hidden records just vanish. Handle all three (§2.2).
 5. **Blindly retrying `4xx`.** `400`/`403`/`404`/`409` are deterministic — retrying repeats the failure and wastes rate budget. Only `429` and (for idempotent ops) `5xx` are retryable (§2.3).
-6. **Non-idempotent writes.** A repeated `POST` makes a second record. Dedupe on a business key with `primaryKey`/`unique` + `409`-as-success, or check-then-write (§3).
+6. **Non-idempotent writes.** A repeated `POST` makes a second record. Dedupe on a business key with `primaryKey`/`unique` + duplicate-`400`-as-success (after re-reading by the key), or check-then-write (§3).
 7. **`populate=*` and over-fetching.** Expanding every relationship (or selecting fields you don't use) multiplies load and invites `429`s. Project with `select` and an explicit `populate` (§4).
 8. **Paging without a stable `sort`.** Records shift between pages under concurrent writes; you skip or double-count. Always `sort` by an immutable field (e.g. `_id`) or use an `updatedAt` cursor (§5.1).
 9. **Paging to extract everything.** For a full dump, `exportData=true` + `format` is one streamed file and raises the `limit` cap — far better than thousands of `limit=500` pages (§5.2).
@@ -492,7 +494,7 @@ Assert on the **status code and the presence of `statusCode`/`error`**, never on
 - [ ] Verified every field name in filters / `sort` / `select` / bodies against the object schema or OpenAPI — a typo is dropped silently.
 - [ ] A single error wrapper branches on `statusCode` / HTTP status (not `error` text) and distinguishes `400` / `401` / `403` / `404` / `409` / `429` / `5xx`.
 - [ ] Retries are limited to `429` (honoring `Retry-After` / back-off + jitter) and, for **idempotent** operations, `5xx`; `4xx` are never blindly retried.
-- [ ] Writes are **idempotent**: deduped on a stable business key via `primaryKey`/`unique` + `409`-as-success, or check-then-write.
+- [ ] Writes are **idempotent**: deduped on a stable business key via `primaryKey`/`unique` + duplicate-`400`-as-success (after re-reading by the key), or check-then-write.
 - [ ] Webhook receivers dedupe on a stable key **and** a scheduled reconcile poll closes any gap; critical logic uses a record-event script instead.
 - [ ] Rate-limit-friendly: bounded concurrency, `select`/explicit `populate` (never `populate=*` by default), server-side filtering, generous page sizes, cached slow-changing data, jittered schedules.
 - [ ] Pagination uses a **stable `sort`** (or an `updatedAt` checkpoint cursor); bulk extracts use `exportData=true` + `format`, not deep paging.

@@ -39,7 +39,7 @@ Sibling documents: [Platform & Data Model](01-platform-and-data-model.md) · [Cu
 
 ### Step 1 — Add the correlation key
 
-Every sync step keys off a stable id shared by both records. Add an `externalId` custom field to `Deal` so you can store the external opportunity's id on the Prolibu record.
+Every sync step keys off a stable id shared by both records. Add an `externalId` custom field to `Deal` so you can store the external opportunity's id on the Prolibu record. (The built-in `refId` can also hold an external id; [External References](13-external-references.md) explains when it is the better choice and when a custom field, as here, is.)
 
 ```bash
 curl -s -X POST "https://<domain>/v2/customfield" \
@@ -372,7 +372,7 @@ curl -s -X PATCH "https://<domain>/v2/vehicle/1HGCM82633A004352" \
 2. **Happy path:** the create in Step 4 (with `mileage` present) returns `201`.
 3. **Declarative validation fires:** a create missing `vin` (or with `status: "invalid"`, or `modelYear: 1900`) returns `400` naming the offending field — no custom code needed.
 4. **Business rule fires:** a create with `status: "passed"` and **no** `mileage` is rejected with a `400` carrying your message *"A Vehicle cannot be marked \"passed\" without a recorded mileage."* — proving the before-event blocked the save.
-5. **Uniqueness:** a second create with the same `vin` returns `400`/`409` (duplicate on a `unique` field).
+5. **Uniqueness:** a second create with the same `vin` returns `400` (`Duplicated value`, a duplicate on a `unique` field).
 6. **Undeclared field is dropped silently:** create with an extra `"color": "red"`; read the record back and confirm `color` was discarded (declare it first if you need it).
 
 ---
@@ -1030,7 +1030,7 @@ else render(r.output.results)
 
 **Recipe 2 — New object**
 - [ ] `POST /v2/cob` with a non-reserved `modelName`; read back the normalized name; polled until `/v2/<name>` is live.
-- [ ] Declared every field; marked one `primaryKey`/`displayName`.
+- [ ] Declared every field; marked one `primaryKey` (records are addressed by it) and, optionally, one `displayName` label field.
 - [ ] Before-event `lifecycleHooks` validation script that throws to block bad saves (object enabled at account level).
 - [ ] Tested happy path, declarative validation, business-rule block, uniqueness, and undeclared-field drop.
 

@@ -146,6 +146,7 @@ When both are present, they are merged and **flat params win** on any key that a
 | Equality | `?dealName=Acme%20renewal` |
 | Operator via suffix | `?amount.$gte=1000` |
 | Nested field | `?urls.linkedIn=https://...` (or `?proposal.enabled=true`) |
+| By external id (`refId`, text values) | `?refId=CUS-10482` (see [External References](13-external-references.md)) |
 | Complex filter (`$or`, ranges) | `?query={"$or":[{"stage":"won"},{"amount":{"$gte":5000}}]}` |
 | `IN` | `?query={"stage":{"$in":["won","lost"]}}` |
 | Regex / contains (case-insensitive) | `?query={"dealName":{"$regex":"acme","$options":"i"}}` |
@@ -255,7 +256,7 @@ Errors return a JSON body with this shape:
 | `404` | Object or record not found. A newly created custom object returns `404` until its schema is applied. |
 | `429` | Rate limited — back off and retry. |
 
-Write validation errors (missing `required` field, `enum`/`min`/`max`/`match` violations, etc.) come back as `400` (or `409` for duplicates) with a message identifying the offending field. See [Custom Objects & Fields](02-custom-objects-and-fields.md) for field constraints.
+Write validation errors (missing `required` field, `enum`/`min`/`max`/`match` violations, etc.) come back as `400` with a message identifying the offending field. A duplicate on a `unique` field is also a `400` duplicate-value error, not a `409`. See [Custom Objects & Fields](02-custom-objects-and-fields.md) for field constraints.
 
 ---
 

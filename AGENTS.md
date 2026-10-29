@@ -13,11 +13,17 @@ none of it should be reconstructed from memory.
 | Inbound HTTP endpoint or webhook receiver | [`07-sites-forms-and-endpoints.md` §1](docs/integrations-for-ai-agents/07-sites-forms-and-endpoints.md#1-custom-endpoints--inbound-http) |
 | Server-side automation, triggers, cron jobs | [`05-automation-and-scripts.md`](docs/integrations-for-ai-agents/05-automation-and-scripts.md) |
 | End-to-end, copy-pasteable integrations | [`12-integration-recipes.md`](docs/integrations-for-ai-agents/12-integration-recipes.md) |
+| Which object, endpoint or skill to use for a goal | [`prolibu-platform-map`](.claude/skills/prolibu-platform-map/SKILL.md) skill |
+| Store another system's id on a record (`refId` / `refUrl`) | [`13-external-references.md`](docs/integrations-for-ai-agents/13-external-references.md) |
 | Build/deploy sites, scripts and virtual tours with this CLI | [`README.md`](README.md) |
 
 Claude Code agents working inside this repo also get these as skills in
-[`.claude/skills/`](.claude/skills) (`prolibu-sites`, `prolibu-scripts`, `prolibu-endpoints`),
-which route to the same references.
+[`.claude/skills/`](.claude/skills): `prolibu-platform-map` (start here to pick the right
+object), `prolibu-sites`, `prolibu-scripts`, `prolibu-endpoints`, `prolibu-forms`,
+`prolibu-webhooks`, `prolibu-external-refs` and `prolibu-custom-fields`. They route to the same
+references. Every skill that writes to an account follows
+[`_shared/WRITE-FLOW.md`](.claude/skills/_shared/WRITE-FLOW.md): ask first, write only after an
+explicit yes, read back.
 
 ---
 

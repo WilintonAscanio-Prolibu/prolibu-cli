@@ -31,7 +31,7 @@ There are two distinct configuration resources. Pick based on whether you need a
 
 Both are defined as configuration data. A field's `type` is written as a **string** (for example `"string"`, `"number"`, `"objectid"`). When you create or update either resource, the configuration is validated immediately, and the new/updated schema is provisioned as part of applying the change.
 
-> **Activation is not instantaneous.** Creating or updating a Custom Object or Custom Field validates and persists your configuration, then schedules the schema to be applied. The new object's endpoints (or the new fields on an existing object) become usable **once the change has been applied** — not on the same millisecond the `POST` returns. Do not immediately `POST` records to a brand-new object; poll for readiness first (see [Common pitfalls](#7-common-pitfalls)).
+> **Every schema change restarts the account's servers.** Creating, updating or deleting a Custom Object or a Custom Field validates and persists your configuration, then restarts every server of the account so the new schema is loaded; the restart took about 15 s as observed on dev accounts and may be longer on production, so poll until the API answers again instead of sleeping a fixed time. Requests sent during that window, by you or by anyone using the account, can fail with a connection error or a `5xx`. The new object's endpoints (or the new fields on an existing object) become usable **only after the restart** — not when the `POST` returns. Do not immediately `POST` records to a brand-new object; poll for readiness first (see [Common pitfalls](#7-common-pitfalls)). Batch schema changes and avoid busy hours on a production account.
 
 ### Field types available to integrators
 
@@ -107,7 +107,7 @@ Each field is an object keyed by the field name, with a string `type` plus optio
 
 It populates like any built-in reference: `?populate=assignee`, `?populate=*`, or a JSON `populatePath`.
 
-**Validation errors** map to the standard error response shape (see [REST API](03-rest-api.md)). For example, omitting a `required` field, breaking a `min`/`max`, `enum`, `minLength`/`maxLength`, `match`, or violating `unique` each returns a `400` (or `409` for duplicates) with a descriptive message and the offending field.
+**Validation errors** map to the standard error response shape (see [REST API](03-rest-api.md)). For example, omitting a `required` field, breaking a `min`/`max`, `enum`, `minLength`/`maxLength`, `match`, or violating `unique` each returns a `400` with a descriptive message and the offending field (a duplicate on a `unique` field returns `400` with `Duplicated value`).
 
 **Undeclared fields are dropped silently.** The generated object only stores fields you declared. Sending an attribute you never defined does not error — the value is simply discarded. **Declare every field you intend to persist.**
 
@@ -120,7 +120,7 @@ Once applied, a Custom Object named `Car` exposes a full CRUD resource at `/v2/c
 | `POST /v2/car` | Create a record |
 | `GET /v2/car` | List records (supports `select`, `populate`, `where`/`query`, `sort`, `limit`, `page`) |
 | `GET /v2/car/search?term=...` | Full-text search across text-indexed fields |
-| `GET /v2/car/{idOrKey}` | Read one — by `_id` **or** by the field marked `primaryKey`/`displayName` |
+| `GET /v2/car/{idOrKey}` | Read one — by `_id` **or** by the value of the field marked `primaryKey` |
 | `PATCH /v2/car/{idOrKey}` | Update |
 | `DELETE /v2/car/{idOrKey}` | Delete |
 
@@ -167,7 +167,7 @@ Response `201` — the persisted configuration (note `modelName` came back norma
 
 ### Step 2 — wait until the resource is live
 
-The object's schema is applied asynchronously. Until it is, `GET/POST /v2/car` returns `404`. Poll a lightweight list call until it stops returning `404`:
+The object's schema is loaded when the account's servers restart (about 15 s observed on dev accounts; may be longer on production). Until then, `GET/POST /v2/car` fails: `404` before the restart, then connection errors or `5xx` while the servers come back. Poll a lightweight list call until it succeeds:
 
 ```bash
 until curl -sf -o /dev/null "https://<domain>/v2/car?limit=1" -H "Authorization: Bearer $TOKEN"; do
@@ -368,8 +368,12 @@ console.log(created.modelName); // "Pet"  (normalized)
 // 2. Wait until /v2/pet is live
 async function waitLive(path) {
   for (let i = 0; i < 30; i++) {
-    const res = await fetch(`${base}/${path}?limit=1`, { headers });
-    if (res.status !== 404) return;
+    try {
+      const res = await fetch(`${base}/${path}?limit=1`, { headers });
+      if (res.ok) return;
+    } catch {
+      // servers are restarting; keep polling
+    }
     await new Promise((r) => setTimeout(r, 2000));
   }
   throw new Error('Timed out waiting for resource to activate');
@@ -392,7 +396,7 @@ A missing `required` field returns `400` with a descriptive message identifying 
 
 ## 7. Common pitfalls
 
-1. **The schema is not live the instant you create it.** Creating a Custom Object (or Custom Field) validates and persists your config and schedules the schema to be applied. The new endpoints/fields become usable only after that completes. Poll for readiness (e.g. an `until` loop on a `limit=1` list call) instead of firing writes immediately — otherwise you get `404` (new object) or your new fields silently drop (new fields).
+1. **The schema is not live the instant you create it.** Creating, updating or deleting a Custom Object (or Custom Field) validates and persists your config, then restarts the account's servers (about 15 s observed on dev accounts; may be longer on production, so poll, don't sleep a fixed time) to load the schema. The new endpoints/fields become usable only after that restart, and other requests to the account can fail while it runs. Poll for readiness (e.g. an `until` loop on a `limit=1` list call) instead of firing writes immediately — otherwise you get `404` (new object) or your new fields silently drop (new fields). If you use the CLI, `./prolibu customfield push` sends every file in the folder, each one triggering its own restart (unchanged files included), with no wait between them; push only the file you changed.
 2. **Undeclared fields are dropped silently.** Both generated objects and Custom Fields store only what you declared. There is no error for an unknown attribute — the value just vanishes. Declare every field you intend to persist.
 3. **`modelName` is normalized.** It is singularized and PascalCased on save (`"pets"` → `"Pet"`). Read it back from the response and derive the REST path from the lowercased value (`Pet` → `/v2/pet`).
 4. **Name collisions return `400`.** A `modelName` cannot be a reserved name or duplicate an existing object. Handle the `400` and pick another name.
@@ -401,7 +405,7 @@ A missing `required` field returns `400` with a descriptive message identifying 
 7. **`unique` custom fields become sparse automatically**, so empty values don't collide.
 8. **One Custom Field record per object.** `objectAssigned` is unique — to add fields later, `PATCH` the existing record (send the complete field set), don't `POST` a new one.
 9. **A newly created Custom Object may not be assignable Custom Fields until it is fully applied.** `objectAssigned` must reference an object the platform already knows about; wait for the new object to be live before attaching Custom Fields to it.
-10. **The record path accepts a key, not just `_id`.** `GET /v2/car/CYM783` resolves by the field marked `primaryKey`/`displayName`. Mark that field intentionally.
+10. **The record path accepts a key, not just `_id`.** `GET /v2/car/CYM783` resolves by the field marked `primaryKey`. Mark that field intentionally.
 
 ---
 
@@ -413,7 +417,7 @@ A missing `required` field returns `400` with a descriptive message identifying 
 - [ ] Expect it to be normalized to PascalCase singular — read the response to confirm.
 - [ ] Define each field as `{ "type": "<supportedType>", ... }`.
 - [ ] For relationships, use `{ "type": "objectid", "ref": "<ObjectName>" }`.
-- [ ] Mark one field `primaryKey: true` / `displayName: true` if you want to address records by its value.
+- [ ] Mark one field `primaryKey: true` if you want to address records by its value (`displayName: true` only sets the label).
 - [ ] `POST /v2/cob`; confirm `201`.
 - [ ] Poll `/v2/<name>?limit=1` until it's live before writing records.
 - [ ] Declare every field you'll persist — undeclared fields are dropped.

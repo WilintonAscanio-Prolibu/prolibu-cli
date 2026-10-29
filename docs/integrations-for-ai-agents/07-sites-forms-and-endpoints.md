@@ -45,7 +45,7 @@ An `Endpoint` binds a public URL to one of your automation [Scripts](05-automati
 | `routeName` | `String`, required, unique | The URL slug. Alphanumeric and hyphens only (DNS-safe). |
 | `method` | `String`, required | One of `GET`, `POST`, `PUT`, `DELETE`. Default `POST`. |
 | `script` | `ObjectId` ref `Script`, required | The automation script to run for each request. |
-| `active` | `Boolean` | Only active endpoints respond; an inactive one returns `404`. |
+| `active` | `Boolean` | Only active endpoints respond; an inactive one returns `400` (`Endpoint is not active`). |
 | `authentication.enabled` | `Boolean`, default `true` | When `true`, the caller must present a valid API key. When `false`, the endpoint is fully public. |
 | `authentication.requiredRoles` | `[ObjectId]` ref `Role` | When set, an authenticated caller must be an admin or hold at least one of these roles, or the request is rejected with `403`. |
 | `collaborators` | `[ObjectId]` | Optional collaborators. |
@@ -111,7 +111,8 @@ The failure shapes are **different objects**, not an envelope with an error insi
 | Script exceeded its `timeout` | `400` | `{ "statusCode": 400, "error": "Script execution timeout" }` |
 | `authentication.enabled` and no/invalid credential | `401` | `{ "statusCode": 401, "error": "Authentication required to access this endpoint" }` |
 | Authenticated but missing a `requiredRoles` role | `403` | `{ "statusCode": 403, "error": "Forbidden, …" }` |
-| Unknown `routeName`, or endpoint `active: false` | `404` | error object |
+| Unknown `routeName` | `404` | error object |
+| Endpoint `active: false` | `400` | `{ "statusCode": 400, "error": "Endpoint is not active" }` |
 | Rate limited | `429` | error object |
 
 Two things follow. First, **the thrown message is echoed verbatim to the caller** — never put a key, a connection string, or a provider's raw error into a thrown `Error`; catch it, log it with `console.error`, and throw something generic. Second, a client cannot distinguish "script failed" from "bad request" by status alone — both are `400` — so return failures you expect as *data* inside `output` (`{ ok: false, reason: … }`) and reserve throwing for genuinely exceptional cases.
@@ -221,15 +222,15 @@ Managed through `/v2/form/` CRUD (authenticated). Key configurable fields:
 | `description` | `String` | Optional description. |
 | `formSchema` | `Object` (JSON) | **The single source of truth for the fields** — see [§2.2](#22-formschema--flat-vs-paged). |
 | `mappings` | `[Object]` | How submitted values become records — see [§2.3](#23-mapping-submissions-to-records). |
-| `access.mode` | `String` enum | `''` (default), `public`, `authenticated`, or `password`. Governs who may submit. |
-| `access.enableCaptcha` | `Boolean`, default `true` | Requires a captcha token when `mode` is `public`. |
+| `access.mode` | `String` enum | `''` (default), `public`, `authenticated`, or `password`. Governs who may submit. The empty default is treated as `public` on submit. |
+| `access.enableCaptcha` | `Boolean`, default `true` | Requires a captcha token when `mode` is `public` (or empty). |
 | `access.password` | `String` | Required password when `mode` is `password` (auto-generated if you enable password mode without supplying one). |
 | `thankYou.title` | `String` | Confirmation heading shown after submit. |
 | `thankYou.message` | `String` | Confirmation body. |
 | `thankYou.redirectURL` | `String` | Optional URL to redirect to after a successful submit. |
 | `submissions.persist` | `Boolean`, default `false` | When `true`, each submission is stored as a `FormSubmission` (see [§2.7](#27-formsubmission)). |
 | `submissions.notifyOnSubmit` | `[ObjectId]` ref `User` | Users to notify on each submission. |
-| `assignmentGroup` | `ObjectId` ref `UserGroup` | Round-robin owner assignment for created records. |
+| `assignmentGroup` | `ObjectId` ref `UserGroup` | Group that receives created records. With the group's load balancing on, it assigns an owner round-robin; with it off, it notifies every member and leaves the record unassigned (on objects that carry `assignmentGroup`, such as `Contact`). |
 | `uploads.enabled` | `Boolean`, default `true` | Whether file-type fields accept uploads. |
 | `uploads.maxFileSizeMB` | `Number` | Per-file size cap (hard ceiling 5 MB). |
 | `active` | `Boolean` | Only active forms accept submissions. |
@@ -274,7 +275,7 @@ Fields must declare a `type` (or a UI component, or a `sourceModel` + `sourceAtt
 | `defaults` | `Object` | Static values merged into every created record. |
 | `assignmentGroup` | `ObjectId` ref `UserGroup` | Optional per-mapping owner assignment override. |
 
-When you save the form it is validated (all failures return `400`): every `modelName` must exist, every `fieldMap` value must reference a field key that exists in `formSchema`, and `action` must be `create`.
+When you save the form it is validated (all failures return `400`): every `modelName` must exist, every `fieldMap` must be non-empty and each of its **keys** must be a field key that exists in `formSchema`, and `action` must be `create`.
 
 ### 2.4 Public form routes
 
@@ -284,19 +285,21 @@ A form exposes these public routes under `/v2/form/`:
 |---|---|---|---|
 | `/v2/form/register` | `PUT` | **Submit** the form (create records). | Public — enforced by the form's `access.mode`. |
 | `/v2/form/upload` | `POST` (multipart) | Upload a file for a `file`-type field. | Public — requires a signed `uploadToken`. |
-| `/v2/form/jsonschema/{id}` | `GET` | Fetch the schema for headless rendering. | Public. |
-| `/v2/form/view/{id}` | `GET` | Server-rendered HTML form. | Public. |
-| `/v2/form/thanks/{id}` | `GET` | Server-rendered confirmation page. | Public. |
+| `/v2/form/jsonschema/{id}` | `GET` | Fetch the schema for headless rendering. `{id}` is the `_id`. | Public. |
+| `/v2/form/view/{id}` | `GET` | Server-rendered HTML form. `{id}` is the `_id` or the `formCode`. | Public. |
+| `/v2/form/thanks/{id}` | `GET` | Server-rendered confirmation page. `{id}` is the `_id` or the `formCode`. | Public. |
 
 > The submit route is **`PUT /v2/form/register`**, not `POST`. This is a common mistake.
 
-Additional authenticated helper routes exist for building forms and for external lead-ad ingestion (`getmodelfields`, `metafields`, `submitexternal`); those require a valid token and are used by tooling rather than by end users.
+All public routes answer `404` while the form is inactive (`active: false`).
+
+One authenticated helper route exists for building forms (`getmodelfields/{modelname}`, the fields of an object). The former lead-ad routes `metafields` and `submitexternal` are deprecated and answer `410`; these routes are no longer handled by Form.
 
 ### 2.5 Submitting a form — `register`
 
-`PUT /v2/form/register` takes `{ id, data }` where `id` is the form's `_id` (or `formCode`) and `data` is a flat object of field-key → value. Depending on `access.mode` you also send:
+`PUT /v2/form/register` takes `{ id, data }` where `id` is the form's `_id` (a `formCode` is rejected with `400`) and `data` is a flat object of field-key → value. Depending on `access.mode` you also send:
 
-- `captchaToken` — required when `mode` is `public` and `enableCaptcha` is `true`.
+- `captchaToken` — required when `mode` is `public` (or empty) and `enableCaptcha` is `true`; without it the request fails with `400`.
 - `password` — required when `mode` is `password`.
 - an `Authorization` bearer token — required when `mode` is `authenticated`.
 - `verifyOnly: true` — validate access without persisting; returns `{ "verified": true }`.
@@ -332,13 +335,13 @@ Response (`200`):
 
 Each `results` entry has `status: "success"` or `status: "failed"` (with an `error` message) so you can tell which mappings succeeded. If a required field defined in `formSchema` is missing, the whole request is rejected with `400`.
 
-Public submission is rate-limited per IP and per form; bursts of submissions beyond those limits return `429`. Design test harnesses accordingly.
+Public submission is rate-limited per IP and per form (a form accepts about 60 submissions per 30 minutes); bursts of submissions beyond those limits return `429`. Design test harnesses accordingly.
 
 ### 2.6 File uploads
 
 Uploads are a two-step, secured flow because the public submitter has no API key:
 
-1. Obtain a short-lived `uploadToken` from the form's render payload (`view`, see [§2.8](#28-headless-rendering)). The token is bound to the form and expires (about 30 minutes).
+1. Obtain a short-lived `uploadToken` from the HTML served by `GET /v2/form/view/{id}`, where it is embedded in the page script. The JSON-schema route in [§2.8](#28-headless-rendering) does not return it. The token is bound to the form and expires (about 30 minutes).
 2. `POST` the file as `multipart/form-data` to `/v2/form/upload` with `formId`, the `uploadToken`, the target `fieldKey`, and the `file`.
 
 ```bash
@@ -388,11 +391,12 @@ Response (`200`):
   "formName": "Contact Form",
   "formSchema": { "...": "..." },
   "fields": { "email": { "type": "email", "required": true } },
-  "access": { "mode": "public", "enableCaptcha": true }
+  "access": { "mode": "public", "enableCaptcha": true },
+  "turnstileSiteKey": "<site key>"
 }
 ```
 
-`fields` is an **object keyed by field key** (not an array); each value is the flattened field definition. This route deliberately **omits** `mappings` and `access.password` — the mapping logic and the password are never exposed publicly. Render from this payload, then submit with `PUT /v2/form/register`.
+`fields` is an **object keyed by field key** (not an array); each value is the flattened field definition. `turnstileSiteKey` is the Cloudflare Turnstile site key to render the captcha widget with; it is empty unless the form is public with captcha on. This route deliberately **omits** `mappings` and `access.password` — the mapping logic and the password are never exposed publicly. Render from this payload, then submit with `PUT /v2/form/register`.
 
 ---
 

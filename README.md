@@ -35,6 +35,24 @@ Key features:
 This README covers the **CLI**. For how the platform itself behaves — the REST API, objects, authentication, scripts, endpoints, forms and hosted sites — read the
 [Integration Guide for AI agents](docs/integrations-for-ai-agents/README.md). It is written for a third-party integrator or an AI agent parametrizing an account, and every claim in it is verified against a live account.
 
+### Working with Claude Code skills
+
+Open Claude Code inside this repo; the skills in `.claude/skills/` load automatically.
+Add an account first with `./prolibu account import` (or `accounts/<domain>/profile.json`).
+The skills create configuration (forms, webhooks, endpoints, custom fields) directly in that
+account, but only after they show you what will be written and you say yes.
+
+What actually protects the account is Claude Code's permission prompt: every call to the
+helper (`.claude/skills/_shared/prolibu-api.js`) asks you first, so read the command before
+approving it. The helper's `--confirmed` flag only guards against accidental writes; it is
+not proof that you agreed.
+
+- Never add a wildcard allow rule for the helper.
+- Do not use auto mode on any account with real data, not only production.
+- For fewer prompts, allow only reads: a rule that matches the helper with `GET` for one
+  domain, such as `Bash(node .claude/skills/_shared/prolibu-api.js example.prolibu.com GET:*)`
+  (check the rule syntax in the Claude Code permissions docs for your version).
+
 ---
 
 ## Requirements
