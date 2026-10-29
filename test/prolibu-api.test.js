@@ -1,0 +1,260 @@
+/* global describe, test, expect, beforeEach, afterEach, jest */
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const api = require('../.claude/skills/_shared/prolibu-api');
+
+let rootDir;
+let out;
+let err;
+let fetchImpl;
+
+const io = () => ({
+  fetchImpl, rootDir,
+  stdout: { write: (s) => { out += s; } },
+  stderr: { write: (s) => { err += s; } },
+});
+const exec = (argv) => api.run(argv, io());
+
+beforeEach(() => {
+  rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'prolibu-api-'));
+  const dir = path.join(rootDir, 'accounts', 'dev99.example.com');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'profile.json'), JSON.stringify({ apiKey: 'SECRET123' }));
+  out = '';
+  err = '';
+  fetchImpl = jest.fn(async () => ({
+    status: 200,
+    text: async () => '{"ok":true}',
+  }));
+});
+afterEach(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+
+test('GET without --confirmed is sent', async () => {
+  const code = await exec(['dev99.example.com', 'GET', '/v2/form?limit=1']);
+  expect(code).toBe(0);
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+  const [url, opts] = fetchImpl.mock.calls[0];
+  expect(url).toBe('https://dev99.example.com/v2/form?limit=1');
+  expect(opts.headers.Authorization).toBe('Bearer SECRET123');
+  expect(JSON.parse(out).status).toBe(200);
+});
+
+test('POST without --confirmed is refused', async () => {
+  const code = await exec(['dev99.example.com', 'POST', '/v2/form', '--data', '{"a":1}']);
+  expect(code).toBe(2);
+  expect(fetchImpl).not.toHaveBeenCalled();
+  expect(err).toContain('Refusing to write without --confirmed');
+});
+
+test('POST with --confirmed sends JSON body', async () => {
+  const code = await exec(['dev99.example.com', 'POST', '/v2/form', '--data', '{"formName":"x"}', '--confirmed']);
+  expect(code).toBe(0);
+  const [, opts] = fetchImpl.mock.calls[0];
+  expect(opts.body).toBe(JSON.stringify({ formName: 'x' }));
+  expect(opts.headers['Content-Type']).toBe('application/json');
+});
+
+test('rejects host injection', async () => {
+  for (const p of ['//evil.com/x', 'https://evil.com/v2/x', '/v2/../x', 'v2/form']) {
+    expect(await exec(['dev99.example.com', 'GET', p])).toBe(2);
+  }
+  for (const d of ['evil.com/x', 'a@b.com', '']) {
+    expect(await exec([d, 'GET', '/v2/form'])).toBe(2);
+  }
+  expect(fetchImpl).not.toHaveBeenCalled();
+});
+
+test('rejects invalid JSON', async () => {
+  const code = await exec(['dev99.example.com', 'POST', '/v2/form', '--data', '{bad', '--confirmed']);
+  expect(code).toBe(2);
+  expect(fetchImpl).not.toHaveBeenCalled();
+});
+
+test('missing profile', async () => {
+  const code = await exec(['dev98.example.com', 'GET', '/v2/form']);
+  expect(code).toBe(2);
+  expect(err).toContain('No profile for dev98.example.com');
+  expect(err).not.toContain('SECRET123');
+  expect(fetchImpl).not.toHaveBeenCalled();
+});
+
+test('redacts key echoed by server', async () => {
+  fetchImpl = jest.fn(async () => ({
+    status: 401,
+    text: async () => '{"error":"bad token SECRET123"}',
+  }));
+  const code = await exec(['dev99.example.com', 'GET', '/v2/form']);
+  expect(code).toBe(1);
+  expect(out).toContain('***');
+  expect(out).not.toContain('SECRET123');
+});
+
+test('production warning', async () => {
+  const dir = path.join(rootDir, 'accounts', 'acme.example.com');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'profile.json'), JSON.stringify({ apiKey: 'SECRET123' }));
+  const code = await exec(['acme.example.com', 'POST', '/v2/form', '--data', '{}', '--confirmed']);
+  expect(code).toBe(0);
+  expect(err).toContain('WARNING: acme.example.com looks like a production account.');
+  expect(api.isLikelyProduction('dev12.example.com')).toBe(false);
+  expect(api.isLikelyProduction('stg.example.com')).toBe(false);
+});
+
+describe('hardening', () => {
+  const D = 'dev99.example.com';
+
+  test('--data-file refuses profile*.json basenames', async () => {
+    const f = path.join(rootDir, 'profile.other.json');
+    fs.writeFileSync(f, '{"apiKey":"OTHER"}');
+    const g = path.join(rootDir, 'PROFILE.json');
+    fs.writeFileSync(g, '{}');
+    for (const file of [f, g]) {
+      expect(await exec([D, 'POST', '/v2/form', '--data-file', file, '--confirmed'])).toBe(2);
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(err).toContain('--data-file');
+  });
+
+  test('--data-file refuses anything under accounts/, including via ..', async () => {
+    const inside = path.join(rootDir, 'accounts', D, 'notes.json');
+    fs.writeFileSync(inside, '{}');
+    const viaDots = path.join(rootDir, 'x', '..', 'accounts', D, 'notes.json');
+    expect(await exec([D, 'POST', '/v2/form', '--data-file', inside, '--confirmed'])).toBe(2);
+    expect(await exec([D, 'POST', '/v2/form', '--data-file', viaDots, '--confirmed'])).toBe(2);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('--data-file outside accounts/ still works', async () => {
+    const f = path.join(rootDir, 'body.json');
+    fs.writeFileSync(f, '{"a":1}');
+    expect(await exec([D, 'POST', '/v2/form', '--data-file', f, '--confirmed'])).toBe(0);
+    expect(fetchImpl.mock.calls[0][1].body).toBe('{"a":1}');
+  });
+
+  test('--data-file refuses files outside temp folders', async () => {
+    const repoFile = path.resolve(__dirname, '..', 'package.json');
+    expect(await exec([D, 'POST', '/v2/form', '--data-file', repoFile, '--confirmed'])).toBe(2);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(err).toContain('must be in a temp folder');
+  });
+
+  test('--data-file follows symlinks out of temp folders', async () => {
+    const link = path.join(rootDir, 'link.json');
+    fs.symlinkSync(path.resolve(__dirname, '..', 'package.json'), link);
+    expect(await exec([D, 'POST', '/v2/form', '--data-file', link, '--confirmed'])).toBe(2);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('redacts secret fields at any depth in the printed body only', async () => {
+    fetchImpl = jest.fn(async () => ({
+      status: 200,
+      text: async () => JSON.stringify({
+        apiKey: 'K1',
+        data: [{ Token: 'T1', nested: { accessToken: 'A1', refreshToken: 'R1' } }],
+        user: { password: 'P1', SECRET: 'S1', clientSecret: 'C1', name: 'kept' },
+      }),
+    }));
+    const body = '{"token":"SENT"}';
+    expect(await exec([D, 'POST', '/v2/form', '--data', body, '--confirmed'])).toBe(0);
+    expect(fetchImpl.mock.calls[0][1].body).toBe(body);
+    for (const v of ['K1', 'T1', 'A1', 'R1', 'P1', 'S1', 'C1']) expect(out).not.toContain(`"${v}"`);
+    const printed = JSON.parse(out).body;
+    expect(printed.data[0].nested.accessToken).toBe('***');
+    expect(printed.user.name).toBe('kept');
+  });
+
+  test('does not redact unrelated keys such as tokenCount', () => {
+    const value = { tokenCount: 5, tokens: ['a'], secretName: 'x', token: 'y' };
+    expect(api.redactFields(value)).toEqual({ tokenCount: 5, tokens: ['a'], secretName: 'x', token: '***' });
+  });
+
+  test('redirects fail loudly', async () => {
+    fetchImpl = jest.fn(async () => { throw new TypeError('fetch failed'); });
+    expect(await exec([D, 'GET', '/v2/form'])).toBe(1);
+    expect(fetchImpl.mock.calls[0][1].redirect).toBe('error');
+    expect(err).toContain('Request failed');
+  });
+
+  test('requests carry a 30s timeout signal and report timeouts', async () => {
+    const spy = jest.spyOn(AbortSignal, 'timeout');
+    fetchImpl = jest.fn(async () => {
+      const e = new Error('The operation was aborted due to timeout');
+      e.name = 'TimeoutError';
+      throw e;
+    });
+    expect(await exec([D, 'GET', '/v2/form'])).toBe(1);
+    expect(spy).toHaveBeenCalledWith(30000);
+    expect(fetchImpl.mock.calls[0][1].signal).toBeDefined();
+    expect(err).toContain('timed out after 30 seconds');
+    spy.mockRestore();
+  });
+
+  test('--data and --data-file are usage errors with GET and DELETE', async () => {
+    const f = path.join(rootDir, 'body.json');
+    fs.writeFileSync(f, '{}');
+    expect(await exec([D, 'GET', '/v2/form', '--data', '{}'])).toBe(2);
+    expect(await exec([D, 'GET', '/v2/form', '--data-file', f])).toBe(2);
+    expect(await exec([D, 'DELETE', '/v2/form/1', '--data', '{}', '--confirmed'])).toBe(2);
+    expect(await exec([D, 'delete', '/v2/form/1', '--data-file', f, '--confirmed'])).toBe(2);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('PATCH, PUT and DELETE are refused without --confirmed', async () => {
+    for (const m of ['PATCH', 'PUT', 'DELETE']) {
+      expect(await exec([D, m, '/v2/form/1'])).toBe(2);
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('lowercase method is treated as a write', async () => {
+    expect(await exec([D, 'post', '/v2/form', '--data', '{}'])).toBe(2);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(await exec([D, 'post', '/v2/form', '--data', '{}', '--confirmed'])).toBe(0);
+    expect(fetchImpl.mock.calls[0][1].method).toBe('POST');
+  });
+
+  test('redact covers URL-encoded and JSON-escaped keys', () => {
+    const secret = 'a+b/c"d\\e';
+    const text = [secret, encodeURIComponent(secret), JSON.stringify(secret).slice(1, -1)].join(' | ');
+    const result = api.redact(text, secret);
+    expect(result).toBe('*** | *** | ***');
+  });
+
+  test('no production warning for a confirmed POST to dev99', async () => {
+    expect(await exec([D, 'POST', '/v2/form', '--data', '{}', '--confirmed'])).toBe(0);
+    expect(err).not.toContain('WARNING');
+  });
+});
+
+describe('--profile', () => {
+  const D = 'dev99.example.com';
+  const writeProfile = (name, key) => fs.writeFileSync(
+    path.join(rootDir, 'accounts', D, name), JSON.stringify({ apiKey: key }),
+  );
+
+  test('--profile nonadmin reads profile.nonadmin.json', async () => {
+    writeProfile('profile.nonadmin.json', 'NONADMIN456');
+    expect(await exec([D, 'GET', '/v2/form', '--profile', 'nonadmin'])).toBe(0);
+    expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBe('Bearer NONADMIN456');
+  });
+
+  test('default profile is unchanged', async () => {
+    writeProfile('profile.nonadmin.json', 'NONADMIN456');
+    expect(await exec([D, 'GET', '/v2/form'])).toBe(0);
+    expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBe('Bearer SECRET123');
+  });
+
+  test('invalid profile names are usage errors', async () => {
+    for (const name of ['../profile', 'Admin', 'a.b', 'x/y', '']) {
+      expect(await exec([D, 'GET', '/v2/form', '--profile', name])).toBe(2);
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('missing alternate profile names the file and does not fall back', async () => {
+    expect(await exec([D, 'GET', '/v2/form', '--profile', 'nonadmin'])).toBe(2);
+    expect(err).toContain('profile.nonadmin.json');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
