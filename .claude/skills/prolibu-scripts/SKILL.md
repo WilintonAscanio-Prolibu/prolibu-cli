@@ -32,7 +32,8 @@ Two consequences change architecture rather than syntax:
   signature, or build a `Basic` auth header. Authenticate inbound callers with a static shared
   secret in a header; for outbound, use token/header auth or pre-compute the encoded value into
   `variables`.
-- **No `require`** ⇒ every integration is a hand-written `axios` call. There is no SDK to reach for.
+- **No `require`** ⇒ every integration is a hand-written `axios` call. There is no SDK to
+  reach for.
 
 ## Rules that are easy to get wrong
 
@@ -59,3 +60,6 @@ something generic, or return the failure as data in `output`.
 
 **Nothing runs unless `active: true`,** and lifecycle hooks additionally require the object to be
 enabled for triggers at the account level — both are off by default.
+
+For how the platform's objects relate, see the `prolibu-platform-map` skill. Account writes
+follow [`../_shared/WRITE-FLOW.md`](../_shared/WRITE-FLOW.md).

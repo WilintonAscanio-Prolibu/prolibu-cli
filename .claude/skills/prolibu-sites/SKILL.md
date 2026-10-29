@@ -52,8 +52,11 @@ page needs a secret, put the call behind a custom Endpoint — see the `prolibu-
 
 ## Deploying
 
-Either the CLI (`./prolibu site dev|prod --domain <d> --prefix <p>`, see the repo README and
-`templates/site/README.md`) or the API directly:
+Deploy with the CLI: `./prolibu site dev|prod --domain <d> --prefix <p>` (see the repo README
+and `templates/site/README.md`). It reads the profile itself; still show the user what will be
+published and where, and wait for a yes before running it.
+
+The raw upload below is **for external integrators outside this repo, not for the agent**:
 
 ```bash
 curl -s -X POST "https://<domain>/v2/site/" \
@@ -63,3 +66,6 @@ curl -s -X POST "https://<domain>/v2/site/" \
 
 Re-deploy by `PATCH`ing a new `package` to `/v2/site/<siteCode>`. It **replaces** the whole
 folder — files you stop shipping disappear.
+
+For how the platform's objects relate, see the `prolibu-platform-map` skill. Account writes
+follow [`../_shared/WRITE-FLOW.md`](../_shared/WRITE-FLOW.md).

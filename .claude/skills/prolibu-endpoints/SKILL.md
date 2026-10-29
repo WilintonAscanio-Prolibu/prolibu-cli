@@ -37,7 +37,8 @@ Failures are **not** that envelope. They are `{ statusCode, error }`:
 | Script threw, rejected, or timed out | `400` |
 | `authentication.enabled` and no/invalid credential | `401` |
 | Authenticated but missing a `requiredRoles` role | `403` |
-| Unknown `routeName`, or endpoint inactive | `404` |
+| Unknown `routeName` | `404` |
+| Endpoint inactive (`Endpoint is not active`) | `400` |
 | Rate limited | `429` |
 
 ## Rules that are easy to get wrong
@@ -70,3 +71,6 @@ Use an endpoint whenever something outside the platform must trigger logic insid
 whenever a secret must stay server-side while a browser or third party benefits from it — the
 endpoint holds the credential in its script, so the client never sees it. That is the only
 pattern where a key is genuinely protected: anything shipped in a page bundle is public.
+
+For how the platform's objects relate, see the `prolibu-platform-map` skill. Account writes
+follow [`../_shared/WRITE-FLOW.md`](../_shared/WRITE-FLOW.md).
